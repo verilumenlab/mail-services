@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { EmailPreview } from "@/components/email/email-preview";
+import { EmailPreview, EmphasizedText } from "@/components/email/email-preview";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/form";
@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/modal";
 import { Alert } from "@/components/ui/misc";
 import { Tabs } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/toast";
+import { bulkReviewNotes } from "@/lib/ai/bulk-email";
 import { api } from "@/lib/client/api";
 import type { BulkOverview, BulkRowItem } from "@/lib/services/bulk";
 
@@ -119,12 +120,16 @@ export function BulkRowDrawer({
       {mode === "preview" && row.email ? (
         <div className="space-y-4">
           {row.problem && <Alert tone="danger" title="Fix before approval">{row.problem}</Alert>}
+          {bulkReviewNotes(row.email.body).map((note) => (
+            <Alert key={note} tone="warning">{note}</Alert>
+          ))}
           <EmailPreview
             account={overview.connectedEmail ? { email: overview.connectedEmail, displayName: null, provider: "" } : null}
             contact={{ email: row.to, fromPersonName: row.fromName || null }}
             email={{ subject: row.email.subject, body: row.email.body }}
             senderName={sender?.senderName}
             cc={cc}
+            attachmentName={overview.campaign.attachment?.name}
           />
           <div className="flex flex-wrap items-end gap-2 rounded-lg border border-line p-3">
             <div className="min-w-[16rem] flex-1">
@@ -190,7 +195,7 @@ export function BulkRowDrawer({
               <Field label="Subject" htmlFor="edit-subject">
                 <Input id="edit-subject" value={subject} maxLength={250} onChange={(e) => setSubject(e.target.value)} />
               </Field>
-              <Field label="Body" htmlFor="edit-body">
+              <Field label="Body" htmlFor="edit-body" hint="Wrap a short phrase in **double asterisks** to make it bold.">
                 <Textarea id="edit-body" rows={14} value={body} onChange={(e) => setBody(e.target.value)} />
               </Field>
               <div className="flex justify-end gap-2">
@@ -214,7 +219,7 @@ export function BulkRowDrawer({
               </p>
               <p className="type-mono-label text-muted">Body</p>
               <pre className="whitespace-pre-wrap break-words rounded-lg border border-line bg-panel-2 p-3 font-sans text-sm" data-testid="bulk-row-body">
-                {row.email.body}
+                <EmphasizedText text={row.email.body} />
               </pre>
             </div>
           ) : (

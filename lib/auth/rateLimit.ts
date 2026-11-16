@@ -16,6 +16,12 @@ export const RATE_LIMITS = {
   send: { name: "send", limit: 20, windowSec: 60 },
   testEmail: { name: "test-email", limit: 10, windowSec: 600 },
   research: { name: "research", limit: 30, windowSec: 600 },
+  esignUpload: { name: "esign-upload", limit: 30, windowSec: 600 },
+  esignSend: { name: "esign-send", limit: 30, windowSec: 600 },
+  signerView: { name: "signer-view", limit: 240, windowSec: 600 },
+  signerAction: { name: "signer-action", limit: 60, windowSec: 600 },
+  // Per IP; each recipient also has its own send and attempt limits, so an office behind one NAT is not locked out.
+  signerOtp: { name: "signer-otp", limit: 30, windowSec: 600 },
 } satisfies Record<string, RateLimitRule>;
 
 /** Fixed-window limiter backed by Postgres so it works across instances and restarts. */

@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText } from "lucide-react";
+import { FileText, Paperclip, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
@@ -11,8 +11,8 @@ import { Alert } from "@/components/ui/misc";
 import { useToast } from "@/components/ui/toast";
 import { detectPlaceholders, renderBulkEmail } from "@/lib/bulk/placeholders";
 import { bulkStepCode, bulkStepHref } from "@/lib/bulk/steps";
-import { api } from "@/lib/client/api";
-import { BODY_FILE_TYPES, parseBodyDocument } from "@/lib/email/body-document";
+import { api, csrfToken } from "@/lib/client/api";
+import { parseBodyDocument } from "@/lib/email/body-document";
 import type { BulkRowsResponse } from "@/lib/services/bulk";
 import type { StepProps } from "./bulk-wizard";
 
@@ -33,6 +33,7 @@ export function BulkTemplateStep({ campaignId, overview, refresh }: StepProps) {
   const toast = useToast();
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
+  const attachRef = useRef<HTMLInputElement>(null);
   const c = overview.campaign;
   const locked = ["SCHEDULED", "RUNNING", "COMPLETED"].includes(c.status);
   const [body, setBody] = useState(c.bulkBody ?? "");
@@ -45,6 +46,7 @@ export function BulkTemplateStep({ campaignId, overview, refresh }: StepProps) {
   const [sample, setSample] = useState<{ customerName: string; companyName: string; fromName: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
+  const [attachment, setAttachment] = useState(c.attachment);
 
   useEffect(() => {
     api<{ templates: TemplateView[] }>("/api/campaign-templates")
@@ -115,8 +117,62 @@ export function BulkTemplateStep({ campaignId, overview, refresh }: StepProps) {
     toast.info(`Loaded "${t.name}"`, "Save to apply it to this campaign.");
   }
 
+  function fileSize(bytes: number): string {
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  async function onAttachment(file: File | undefined) {
+    if (!file) return;
+    setBusy("attach");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`/api/campaigns/${campaignId}/attachment`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken() },
+        body: form,
+        credentials: "same-origin",
+      });
+      const data = (await res.json().catch(() => null)) as { attachment?: { name: string; size: number }; error?: { message?: string } } | null;
+      if (!res.ok) throw new Error(data?.error?.message ?? "Could not attach the file.");
+      setAttachment(data?.attachment ?? { name: file.name, size: file.size });
+      toast.success("File attached", "It will be sent with every email in this campaign.");
+      await refresh();
+    } catch (err) {
+      toast.error("Could not attach the file", err instanceof Error ? err.message : undefined);
+    } finally {
+      setBusy(null);
+      if (attachRef.current) attachRef.current.value = "";
+    }
+  }
+
+  async function removeAttachment() {
+    setBusy("attach");
+    try {
+      await api(`/api/campaigns/${campaignId}/attachment`, { method: "DELETE" });
+      setAttachment(null);
+      toast.success("Attachment removed");
+      await refresh();
+    } catch (err) {
+      toast.error("Could not remove the attachment", err instanceof Error ? err.message : undefined);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function isBodyDocument(file: File): boolean {
+    const name = file.name.toLowerCase();
+    return name.endsWith(".docx") || name.endsWith(".pdf") || name.endsWith(".txt") || file.type === "application/pdf" || file.type === "text/plain";
+  }
+
   async function onFile(file: File | undefined) {
     if (!file) return;
+    if (!isBodyDocument(file) || file.size > 5 * 1024 * 1024) {
+      await onAttachment(file);
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     setReading(true);
     try {
       const doc = await parseBodyDocument(file);
@@ -136,7 +192,7 @@ export function BulkTemplateStep({ campaignId, overview, refresh }: StepProps) {
         <CardHeader
           code={bulkStepCode("template")}
           title="Email body"
-          description="Upload or paste your email once (Word, PDF or text). Every contact gets this same format; the AI only fills in and lightly adjusts it for each contact."
+          description="Upload or paste your email once (Word, PDF or text). The AI rewrites it into professional English for each contact and does not invent facts."
           actions={
             <div className="flex flex-wrap gap-2">
               <Button loading={busy === "save"} disabled={locked} onClick={() => void save(false)}>
@@ -161,7 +217,7 @@ export function BulkTemplateStep({ campaignId, overview, refresh }: StepProps) {
             <Button loading={reading} disabled={locked} onClick={() => fileRef.current?.click()} data-testid="bulk-body-upload">
               {bodyFile ? "Replace file" : "Choose file"}
             </Button>
-            <input ref={fileRef} type="file" accept={BODY_FILE_TYPES} className="hidden" onChange={(e) => void onFile(e.target.files?.[0])} />
+            <input ref={fileRef} type="file" className="hidden" onChange={(e) => void onFile(e.target.files?.[0])} />
             {templates.length > 0 && (
               <div className="min-w-[12rem]">
                 <Select aria-label="Load saved template" value="" onChange={(e) => loadTemplate(e.target.value)}>
@@ -174,6 +230,27 @@ export function BulkTemplateStep({ campaignId, overview, refresh }: StepProps) {
                 </Select>
               </div>
             )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-dashed border-line-strong p-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-panel-3 text-fg">
+              <Paperclip className="h-5 w-5" strokeWidth={1.75} aria-hidden />
+            </div>
+            <div className="min-w-[12rem] flex-1">
+              <p className="text-sm font-medium">{attachment ? attachment.name : "Attach a file to every email"}</p>
+              <p className="text-xs text-muted">
+                {attachment ? `${fileSize(attachment.size)} · sent unchanged with each email. This is separate from the email body.` : "Any file, up to 100 MB. Optional. Gmail can deliver attachments up to 25 MB."}
+              </p>
+            </div>
+            <Button loading={busy === "attach"} disabled={locked} onClick={() => attachRef.current?.click()} data-testid="bulk-attachment-upload">
+              {attachment ? "Replace file" : "Choose file"}
+            </Button>
+            {attachment && (
+              <Button size="icon-sm" variant="ghost" aria-label="Remove attachment" disabled={locked || busy === "attach"} onClick={() => void removeAttachment()}>
+                <X />
+              </Button>
+            )}
+            <input ref={attachRef} type="file" className="hidden" onChange={(e) => void onAttachment(e.target.files?.[0])} />
           </div>
 
           <Field label="Email body *" htmlFor="bulk-body" hint="Optional placeholders: [To Name], [Company Name], [From Name]. Your signature is added below the body automatically (next step).">
@@ -207,7 +284,7 @@ export function BulkTemplateStep({ campaignId, overview, refresh }: StepProps) {
             </label>
           </fieldset>
 
-          <Field label="Instructions for the AI (optional)" htmlFor="bulk-ai" hint="For example: mention the contact's city if it is in the file. The AI keeps your format and never invents facts.">
+          <Field label="Instructions for the AI (optional)" htmlFor="bulk-ai" hint="For example: mention the contact's city if it is in the file. The AI polishes the writing and never invents facts.">
             <Textarea id="bulk-ai" rows={3} value={aiInstructions} maxLength={2000} onChange={(e) => setAiInstructions(e.target.value)} disabled={locked} />
           </Field>
 

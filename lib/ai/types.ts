@@ -41,6 +41,8 @@ export interface GenerateOptions {
   strictJsonReminder?: boolean;
   /** Problems found in the previous attempt's output, sent back so the model can correct them. */
   correction?: string;
+  /** Lower values follow the rewrite rules more closely. */
+  temperature?: number;
 }
 
 /** Friendly message for end users. */

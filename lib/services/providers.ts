@@ -1,5 +1,6 @@
 import "server-only";
 import { db } from "@/lib/database/prisma";
+import { uniqueKeys } from "@/lib/ai/key-ring";
 import { env } from "@/lib/env";
 import { AppError, errorMessage } from "@/lib/errors";
 import type { EmailAccount } from "@/lib/generated/prisma/client";
@@ -74,13 +75,14 @@ const g = globalThis as unknown as { __openRouterKeyCheck?: { at: number; ok: bo
 /** Checks the OpenRouter key against the key endpoint (cached). Never returns key material. */
 async function checkOpenRouter(force: boolean): Promise<{ ok: boolean; detail: string }> {
   const e = env();
-  if (!e.OPENROUTER_API_KEY) return { ok: false, detail: "OPENROUTER_API_KEY is not set on the server" };
+  const key = uniqueKeys(e.OPENROUTER_API_KEY, e.OPENROUTER_API_KEYS)[0];
+  if (!key) return { ok: false, detail: "No OpenRouter API key is set" };
   const cached = g.__openRouterKeyCheck;
   if (!force && cached && Date.now() - cached.at < KEY_CHECK_TTL_MS) return cached;
   let result: { ok: boolean; detail: string };
   try {
     const res = await fetch("https://openrouter.ai/api/v1/key", {
-      headers: { Authorization: `Bearer ${e.OPENROUTER_API_KEY}` },
+      headers: { Authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(10_000),
     });
     if (res.ok) result = { ok: true, detail: `Model ${e.OPENROUTER_MODEL}` };
@@ -110,18 +112,21 @@ export async function getProviderStatus(userId: string, opts: { force?: boolean 
   const settings = await getProviderSettings(userId);
   const e = env();
 
+  const openrouterKeys = uniqueKeys(e.OPENROUTER_API_KEY, e.OPENROUTER_API_KEYS);
+  const groqKeys = uniqueKeys(e.GROQ_API_KEY, e.GROQ_API_KEYS);
+  const loopDetail = `${openrouterKeys.length} OpenRouter and ${groqKeys.length} Groq keys rotate when one runs out`;
+
   let ai: ProviderHealth;
   if (settings.ai === "mock") {
     ai = { provider: "mock", label: "Mock AI", connected: true, detail: "Development templates - not real AI" };
-  } else if (settings.ai === "groq") {
-    ai = { provider: "groq", label: "Groq", connected: e.GROQ_API_KEY.length > 0, detail: e.GROQ_API_KEY ? `Model ${e.GROQ_MODEL}` : "GROQ_API_KEY is not set" };
   } else {
-    const check = await checkOpenRouter(!!opts.force);
-    if (!check.ok && e.GROQ_API_KEY) {
-      ai = { provider: "openrouter", label: "OpenRouter (Groq fallback active)", connected: true, detail: `Groq fallback active: ${e.GROQ_MODEL}` };
-    } else {
-      ai = { provider: "openrouter", label: "OpenRouter", connected: check.ok, detail: check.detail };
-    }
+    const check = openrouterKeys.length ? await checkOpenRouter(!!opts.force) : { ok: groqKeys.length > 0, detail: loopDetail };
+    ai = {
+      provider: settings.ai === "groq" ? "groq" : "openrouter",
+      label: "AI key loop",
+      connected: check.ok || groqKeys.length > 0 || openrouterKeys.length > 1,
+      detail: loopDetail,
+    };
   }
 
   const account = await getActiveEmailAccount(userId, settings.email);

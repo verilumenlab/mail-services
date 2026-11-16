@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildBulkPrompt, bulkBodyProblems, bulkLeakProblems, bulkSubjectProblems, extractBulkContext, extractBulkField, NOT_AVAILABLE } from "@/lib/ai/bulk-email";
+import { applyHighlights, buildBulkPrompt, bulkBodyProblems, defaultHighlight, bulkLeakProblems, bulkReviewNotes, bulkSubjectProblems, extractBulkContext, extractBulkField, finishRewrite, NOT_AVAILABLE } from "@/lib/ai/bulk-email";
 import { autoMapBulkColumns, BULK_HEADER_ALIASES, sanitizeBulkMapping } from "@/lib/bulk/fields";
 import { detectPlaceholders, hasSenderPlaceholders, leftoverPlaceholders, renderBulkEmail, senderSignature, withSignature, type BulkSender } from "@/lib/bulk/placeholders";
 import { bulkRowStatus } from "@/lib/bulk/status";
@@ -8,6 +8,8 @@ import { BULK_STEPS, isBulkStep, nextBulkStep } from "@/lib/bulk/steps";
 import { validateBulkRows } from "@/lib/bulk/validate";
 import { pdfPagesToRows, type TextPiece } from "@/lib/csv/pdf";
 import { composeOutgoing } from "@/lib/email/compose";
+import { prepareAttachment } from "@/lib/email/attachment";
+import { htmlBody, letterPlain, plainBody } from "@/lib/email/emphasis";
 import { buildMimeMessage } from "@/lib/email/mime";
 import { isValidTimeZone, zonedDateTimeToUtc } from "@/lib/queue/schedule";
 import { bulkCheckSchema, bulkSendSchema, bulkSettingsSchema, ccEmailsSchema, recipientEmailSchema } from "@/lib/validation/bulk";
@@ -185,10 +187,14 @@ describe("placeholders and the sender signature", () => {
 describe("AI checks", () => {
   const rendered = renderBulkEmail({ body: BODY, subjectTemplate: "x", recipient: { customerName: "Priya Shah", companyName: "Nova Semi" }, sender: SENDER }).body;
 
-  it("accepts the unchanged body and rejects structural changes", () => {
+  it("accepts polished wording and rejects a body that drops or adds sentences", () => {
     assert.deepEqual(bulkBodyProblems(rendered, rendered), []);
-    assert.match(bulkBodyProblems(rendered, rendered.replace("- SLT yield analytics\n", "")).join(), /bullet/);
-    assert.match(bulkBodyProblems(rendered, `${rendered}\n\nP.S. We also offer a free audit to every customer this quarter.`).join(), /paragraphs/);
+    const polished = rendered.replace("Hi Priya Shah,", "Dear Priya,").replace("Could we talk this week?", "Could we speak this week?");
+    assert.deepEqual(bulkBodyProblems(rendered, polished), []);
+    assert.deepEqual(bulkBodyProblems(rendered, rendered.replace("this week", "**this week**")), []);
+    assert.match(bulkBodyProblems(rendered, "Dear Priya, could we talk?").join(), /Removed part of the draft/);
+    const offer = "We also offer a free audit, a pilot, and a discount to every customer this quarter.";
+    assert.match(bulkBodyProblems(rendered, `${rendered}\n\n${offer}`).join(), /Added new text/);
     assert.match(bulkBodyProblems(rendered, rendered.replace("Nova Semi", "[Company Name]")).join(), /Unreplaced placeholders/);
   });
 
@@ -196,6 +202,98 @@ describe("AI checks", () => {
     assert.deepEqual(bulkSubjectProblems("Cutting SLT time at Nova Semi"), []);
     assert.match(bulkSubjectProblems("").join(), /empty/);
     assert.match(bulkSubjectProblems("Hello [Company Name]").join(), /placeholders/);
+    assert.match(bulkSubjectProblems("PLEASE read this now").join(), /Shouted capitals/);
+    assert.match(bulkSubjectProblems("Update for Nova Semi!").join(), /exclamation mark/);
+    assert.deepEqual(bulkSubjectProblems("Update for Nova Semi!", "Please reply!"), []);
+  });
+
+  it("requires a greeting and keeps numbers and links from the draft", () => {
+    const polished = rendered.replace("Hi Priya Shah,", "Dear Priya,");
+    assert.deepEqual(bulkBodyProblems(rendered, polished, "Priya Shah"), []);
+    assert.match(bulkBodyProblems(rendered, rendered, "Priya Shah").join(), /professional greeting/);
+    assert.match(bulkBodyProblems(rendered, rendered.replace("98450", "the office line"), "Priya Shah").join(), /Missing number/);
+    assert.match(bulkBodyProblems(rendered, rendered.replace("https://acme-ate.example", "our website").replace("Hi Priya Shah,", "Dear Priya,"), "Priya Shah").join(), /Missing URL/);
+  });
+
+  it("keeps a rewrite that drops a pasted mailbox time and puts the signature and link back", () => {
+    const signature = "Subhash Rao\nsubhash@acme-ate.example";
+    const draft = `3:04 PM (1 hour ago)\nto nithin, me\n\nDear Priya,\n\nPlease review 9 datasets before Friday.\n\nhttps://drive.google.com/file/d/abc/view\n\n${signature}`;
+    const rewritten = "Dear Priya,\n\nPlease review the 9 datasets and submit before Friday.\n\nKind regards,\nSomeone Else";
+    const done = finishRewrite(draft, rewritten, signature);
+    assert.ok(done.endsWith(signature));
+    assert.match(done, /https:\/\/drive\.google\.com\/file\/d\/abc\/view/);
+    assert.doesNotMatch(done, /3:04/);
+    assert.deepEqual(bulkBodyProblems(draft, done, "Priya").filter((p) => /3:04|Missing URL|Missing number/.test(p)), []);
+  });
+
+  it("keeps a sentence that starts with to, and drops pasted mailbox lines", () => {
+    const signature = "Subhash Rao\nsubhash@acme-ate.example";
+    const draft = `subhan <subhan@example.com>\n3:04 PM (1 hour ago)\nto nithin, me\n\nDear Priya,\n\nto present and explain their work, covering the 3 points before Friday.\n\n${signature}`;
+    const kept = draft.replace("the 3 points", "the points").replace("3:04 PM (1 hour ago)\n", "");
+    assert.match(bulkBodyProblems(draft, kept, "Priya").join(), /Missing number from the draft \(3\)/);
+    const done = finishRewrite(draft, draft.replace("Dear Priya,", "Dear Priya,"), signature);
+    assert.doesNotMatch(done, /3:04/);
+    assert.doesNotMatch(done, /subhan@example\.com/);
+    assert.doesNotMatch(done, /to nithin, me/);
+    assert.match(done, /to present and explain their work/);
+    assert.match(done, /\*\*before Friday\*\*/);
+    assert.ok(done.endsWith(signature));
+    assert.deepEqual(bulkBodyProblems(draft, done, "Priya"), []);
+  });
+
+  it("keeps the weekday, the file name, and the numbered sections", () => {
+    const signature = "Subhash Rao\nsubhash@acme-ate.example";
+    const draft = `Dear Priya,\n\n1. Review the datasets in notes.rar before Friday.\n\n2. Present the work.\n\n${signature}`;
+    const dropped = draft.replace("before Friday", "soon").replace("notes.rar", "the archive");
+    const problems = bulkBodyProblems(draft, dropped, "Priya").join();
+    assert.match(problems, /Friday/i);
+    assert.match(problems, /notes\.rar/);
+    assert.match(bulkBodyProblems(draft, draft.replace("2. Present", "Present"), "Priya").join(), /Missing section/);
+    const rewritten = "Dear Priya,\n\n1. Please review the datasets before Friday.\n\n2. Present the work.";
+    const done = finishRewrite(draft, rewritten, signature);
+    assert.match(done, /notes\.rar/);
+    assert.match(done, /before Friday/);
+    assert.doesNotMatch(done, /\d{1,2}\s+October/);
+    assert.ok(done.endsWith(signature));
+    assert.deepEqual(bulkBodyProblems(draft, done, "Priya"), []);
+  });
+
+  it("notes a weekday deadline and a link, and stays quiet for a calendar date", () => {
+    assert.deepEqual(bulkReviewNotes("Please submit before Friday.\n\nhttps://forms.gle/abc"), [
+      "Confirm the calendar date for this deadline before sending.",
+      "Open each link and confirm the recipient can access it.",
+    ]);
+    assert.deepEqual(bulkReviewNotes("Please submit before 31 October 2026."), []);
+    assert.deepEqual(bulkReviewNotes("Please see Offer.pdf."), ["Confirm the named file is attached before sending."]);
+    assert.deepEqual(bulkReviewNotes("Please reply today."), []);
+  });
+
+  it("keeps the uploaded body word for word and only adds highlights", () => {
+    const upload = "Hi C nithin,\n\n1. Review the datasets\n   - submit the form before Friday\n\nthanks\nsubhan\nsubhan@verilumen.ai";
+    const expected = "Hi C nithin,\n\n1. Review the datasets\n   - submit the form **before Friday**\n\nthanks\nsubhan\nsubhan@verilumen.ai";
+    const reworded = "Dear Nithin,\n\n1. Please review the datasets.\n- Submit the form **before Friday**.\n\nThanks,\n**subhan**\nsubhan@verilumen.ai";
+    assert.equal(applyHighlights(upload, reworded, "subhan\nsubhan@verilumen.ai"), expected);
+    assert.equal(applyHighlights(upload, "Hi **Nithin Kumar**, see **all files**"), upload);
+    assert.equal(applyHighlights(upload, upload), upload);
+    assert.equal(applyHighlights("Send **before Friday** now.", "Send **before Friday** now."), "Send **before Friday** now.");
+    assert.equal(defaultHighlight(upload), upload.replace("before Friday", "**before Friday**"));
+    assert.equal(defaultHighlight("Send it **today** before Friday."), "Send it **today** before Friday.");
+  });
+
+  it("keeps the draft's sentences and rejects a body that drops them", () => {
+    const requirement = (n: number) => `This is requirement number ${n} and it must stay available for the candidate to follow.`;
+    const draft = `Dear Priya,\n\n${[1, 2, 3, 4].map(requirement).join(" ")}\n\nPlease submit before Friday.`;
+    assert.deepEqual(bulkBodyProblems(draft, draft, "Priya"), []);
+    const stiff = "Dear Priya,\n\nI am writing to inform you that you have been shortlisted before Friday.";
+    assert.deepEqual(bulkBodyProblems(stiff, stiff, "Priya"), []);
+    const shortened = `Dear Priya,\n\n${[1, 2].map(requirement).join(" ")}\n\nPlease submit before Friday.`;
+    assert.match(bulkBodyProblems(draft, shortened, "Priya").join(), /Removed part of the draft/);
+  });
+
+  it("requires the contact name in the opening", () => {
+    const team = rendered.replace("Hi Priya Shah,", "Dear Team,");
+    assert.match(bulkBodyProblems(rendered, team, "Priya Shah").join(), /recipient by name/);
+    assert.deepEqual(bulkBodyProblems(rendered, rendered.replace("Hi Priya Shah,", "Dear Priya,"), "Priya Shah"), []);
   });
 
   it("detects another recipient leaking into AI output", () => {
@@ -226,7 +324,10 @@ describe("AI checks", () => {
     assert.equal(ctx.company_name, "Nova Semi");
     assert.equal(ctx.from_name, NOT_AVAILABLE);
     assert.equal(ctx.City, "Pune");
-    assert.match(p.user, /Personalisation: ENABLED/);
+    assert.match(p.user, /Return the body exactly as given/);
+    assert.match(p.user, /Do not change any word/);
+    assert.match(p.system, /Do not correct, rephrase, add, or remove anything/);
+    assert.match(p.system, /\*\*double asterisks\*\*/);
     assert.equal(extractBulkField(p.user, "rendered_body"), rendered);
     assert.equal(extractBulkField(p.user, "fixed_subject"), "");
   });
@@ -255,6 +356,110 @@ describe("outgoing message", () => {
     assert.match(mime, /\r\nCc: boss@acme\.example, team@acme\.example\r\n/);
     assert.doesNotMatch(buildMimeMessage({ ...msg, cc: [] }), /\r\nCc:/);
     assert.throws(() => buildMimeMessage({ ...msg, cc: ["bad\r\nBcc: x@y.example"] }), /Invalid CC address/);
+  });
+
+  it("attaches a file without changing the plain-text body", () => {
+    const msg = composeOutgoing({
+      account: { email: "me@gmail.example", displayName: null },
+      contact: { email: "priya@nova.example", fromPersonName: null },
+      email: { subject: "S", body: "Hello Priya" },
+      attachments: [{ filename: "brochure.pdf", contentType: "application/pdf", content: Buffer.from("PDFDATA") }],
+    });
+    const mime = buildMimeMessage(msg);
+    assert.match(mime, /Content-Type: multipart\/mixed; boundary="/);
+    assert.match(mime, /filename="brochure\.pdf"/);
+    assert.match(mime, /Content-Type: application\/pdf/);
+    const text = mime.split("Content-Type: text/plain")[1] ?? "";
+    const b64 = text.split("\r\n\r\n")[1]?.split("\r\n--")[0]?.replace(/\r\n/g, "") ?? "";
+    assert.equal(Buffer.from(b64, "base64").toString("utf8"), "Hello Priya");
+    const bare = buildMimeMessage({ ...msg, attachments: [] });
+    assert.match(bare, /multipart\/alternative/);
+    assert.doesNotMatch(bare, /multipart\/mixed/);
+  });
+
+  it("bolds marked phrases in HTML and keeps them plain, with raw markup escaped", () => {
+    const source = "Please submit **before Friday**.\n\n<script>alert(1)</script>";
+    assert.equal(plainBody(source), "Please submit before Friday.\n\n<script>alert(1)</script>");
+    const html = htmlBody(source);
+    assert.match(html, /<strong>before Friday<\/strong>/);
+    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>/);
+    const designed = htmlBody("Dear Priya,\n\n1. **Dataset**\n- Review the file.\n\nPlease submit **before Friday**.\n\nPriya Shah\npriya@nova.example");
+    assert.match(designed, /<li[^>]*>Review the file\./);
+    assert.match(designed, />1\. Dataset</);
+    assert.doesNotMatch(designed, /width:28px/);
+    const lines = htmlBody("Dear Priya,\n\nWhat if your ATE could test faster?\nThe result: lower cost.\n\nBest regards,\nPriya Shah\npriya@nova.example");
+    assert.match(lines, /<p[^>]*>What if your ATE could test faster\?<\/p><p[^>]*>The result: lower cost\.<\/p>/);
+    assert.match(designed, /<strong>before Friday<\/strong>/);
+    const branded = htmlBody("Dear Satish,\n\n1. Dataset\n- Review the file.\n\nVerilumen Labs Pvt. Ltd.\nwww.verilumen.ai");
+    assert.match(branded, /src="\/brand\/verilumen-logo.png\?v=navy"/);
+    assert.match(branded, /background:#0b1d3a/);
+    assert.match(branded, /Verilumen Labs Pvt\. Ltd\./);
+    assert.doesNotMatch(branded, /width:28px/);
+    const pasted = [
+      "subhan <subhan@example.com>",
+      "3:04 PM (1 hour ago)",
+      "to nithin, me",
+      "",
+      "Dear Priya,",
+      "",
+      "to present and explain their work.",
+      "",
+      "1. Dataset",
+      "-> Review the file.",
+      "",
+      "Best regards,",
+      "Priya Shah",
+      "priya@nova.example",
+      "",
+      "<script>alert(1)</script>",
+    ].join("\n");
+    const laidOut = htmlBody(pasted);
+    assert.match(laidOut, /<li[^>]*>Review the file\./);
+    assert.doesNotMatch(laidOut, /<p[^>]*>Best regards/);
+    assert.match(laidOut, /Best regards/);
+    assert.doesNotMatch(laidOut, /3:04/);
+    assert.match(laidOut, /to present and explain their work/);
+    assert.match(laidOut, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.doesNotMatch(laidOut, /<script>/);
+    assert.doesNotMatch(letterPlain(pasted), /3:04/);
+    assert.match(letterPlain(pasted), /to present and explain their work/);
+    const msg = composeOutgoing({
+      account: { email: "me@gmail.example", displayName: null },
+      contact: { email: "priya@nova.example", fromPersonName: null },
+      email: { subject: "S", body: source },
+    });
+    const mime = buildMimeMessage(msg);
+    assert.match(mime, /multipart\/alternative/);
+    const htmlPart = mime.split("Content-Type: text/html")[1] ?? "";
+    const htmlB64 = htmlPart.split("\r\n\r\n")[1]?.split("\r\n--")[0]?.replace(/\r\n/g, "") ?? "";
+    const decoded = Buffer.from(htmlB64, "base64").toString("utf8");
+    assert.match(decoded, /<strong>before Friday<\/strong>/);
+    assert.match(decoded, /&lt;script&gt;/);
+    assert.doesNotMatch(decoded, /<script>/);
+    const text = mime.split("Content-Type: text/plain")[1] ?? "";
+    const b64 = text.split("\r\n\r\n")[1]?.split("\r\n--")[0]?.replace(/\r\n/g, "") ?? "";
+    assert.equal(Buffer.from(b64, "base64").toString("utf8"), "Please submit before Friday.\r\n\r\n<script>alert(1)</script>");
+    const brandedMsg = composeOutgoing({
+      account: { email: "me@gmail.example", displayName: null },
+      contact: { email: "satish@nova.example", fromPersonName: null },
+      email: { subject: "S", body: "Dear Satish,\n\nPlease review the file.\n\nVerilumen Labs Pvt. Ltd.\nwww.verilumen.ai" },
+    });
+    const brandedMime = buildMimeMessage(brandedMsg);
+    assert.match(brandedMime, /multipart\/related/);
+    assert.match(brandedMime, /Content-ID: <verilumen-logo>/);
+    assert.match(brandedMime, /image\/png/);
+  });
+});
+
+describe("campaign attachment", () => {
+  it("accepts any file up to 100 MB", () => {
+    assert.equal(prepareAttachment("C:\\docs\\Offer.pdf", 1200).contentType, "application/pdf");
+    assert.equal(prepareAttachment("notes.txt", 4).filename, "notes.txt");
+    assert.equal(prepareAttachment("Test Engineering Solutions.rar", 90 * 1024 * 1024).contentType, "application/vnd.rar");
+    assert.equal(prepareAttachment("setup.exe", 20).contentType, "application/octet-stream");
+    assert.throws(() => prepareAttachment("empty.pdf", 0), /empty/);
+    assert.throws(() => prepareAttachment("big.bin", 101 * 1024 * 1024), /100 MB/);
   });
 });
 

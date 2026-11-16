@@ -1,0 +1,13 @@
+.git
+node_modules
+.next
+.next-desktop
+dist-desktop
+desktop/app-server
+portal
+data
+.env
+.env.*
+!.env.example
+tmp-*
+*.log

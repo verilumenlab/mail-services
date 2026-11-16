@@ -34,8 +34,12 @@ const schema = z.object({
   ADMIN_EMAIL: z.string().trim().toLowerCase().default(""),
 
   OPENROUTER_API_KEY: z.string().default(""),
+  /** Extra OpenRouter keys, comma-separated. Tried after OPENROUTER_API_KEY, then the loop returns to the first. */
+  OPENROUTER_API_KEYS: z.string().default(""),
   OPENROUTER_MODEL: z.string().default("openai/gpt-4o-mini"),
   GROQ_API_KEY: z.string().default(""),
+  /** Extra Groq keys, comma-separated. Tried after the OpenRouter keys. */
+  GROQ_API_KEYS: z.string().default(""),
   GROQ_MODEL: z.string().default("openai/gpt-oss-120b"),
   AI_CONCURRENCY: intFromEnv(3, 1, 10),
   AI_MAX_RETRIES: intFromEnv(4, 0, 10),
@@ -151,8 +155,8 @@ export function configChecks(): ConfigCheck[] {
     {
       key: "OPENROUTER_API_KEY",
       label: "OpenRouter API key",
-      ok: e.aiProvider === "mock" || e.OPENROUTER_API_KEY.length > 0 || e.GROQ_API_KEY.length > 0,
-      hint: e.aiProvider === "mock" ? "Using development mock AI provider" : e.GROQ_API_KEY ? "Using Groq fallback" : "Required for AI generation",
+      ok: e.aiProvider === "mock" || e.OPENROUTER_API_KEY.length > 0 || e.OPENROUTER_API_KEYS.length > 0 || e.GROQ_API_KEY.length > 0 || e.GROQ_API_KEYS.length > 0,
+      hint: e.aiProvider === "mock" ? "Using development mock AI provider" : "Keys are tried in a loop when one runs out",
     },
     { key: "OPENROUTER_MODEL", label: "OpenRouter model", ok: e.OPENROUTER_MODEL.length > 0, hint: e.OPENROUTER_MODEL },
     {

@@ -23,6 +23,7 @@ export interface ChatJsonOptions {
   signal?: AbortSignal;
   temperature?: number;
   maxTokens?: number;
+  apiKey?: string;
 }
 
 export interface ChatJsonResult {
@@ -36,7 +37,8 @@ export interface ChatJsonResult {
 /** Server-side Groq chat call in JSON mode with timeout and typed errors. */
 export async function chatGroqJson(messages: ChatMessage[], opts: ChatJsonOptions = {}): Promise<ChatJsonResult> {
   const e = env();
-  if (!e.GROQ_API_KEY) throw new AiError("NOT_CONFIGURED", "GROQ_API_KEY is not set");
+  const apiKey = opts.apiKey || e.GROQ_API_KEY;
+  if (!apiKey) throw new AiError("NOT_CONFIGURED", "GROQ_API_KEY is not set");
   const model = e.GROQ_MODEL || "openai/gpt-oss-120b";
 
   const controller = new AbortController();
@@ -51,7 +53,7 @@ export async function chatGroqJson(messages: ChatMessage[], opts: ChatJsonOption
       method: "POST",
       signal: controller.signal,
       headers: {
-        Authorization: `Bearer ${e.GROQ_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -81,6 +83,7 @@ export async function chatGroqJson(messages: ChatMessage[], opts: ChatJsonOption
   if (!res.ok) {
     const msg = data?.error?.message?.slice(0, 300) ?? `Groq HTTP ${res.status}`;
     const retryAfterMs = parseRetryAfter(res.headers.get("retry-after")) ?? undefined;
+    if (/credit|afford|quota|insufficient|billing/i.test(msg)) throw new AiError("CREDITS", msg, { httpStatus: res.status, retryAfterMs });
     if (res.status === 429) throw new AiError("RATE_LIMIT", msg, { httpStatus: 429, retryAfterMs });
     if (res.status === 401 || res.status === 403) throw new AiError("AUTH", msg, { httpStatus: res.status });
     if (res.status === 408) throw new AiError("TIMEOUT", msg, { httpStatus: 408 });
@@ -129,7 +132,7 @@ export const groqProvider: AiProvider = {
       });
     }
 
-    const result = await chatGroqJson(messages, { signal: opts.signal });
+    const result = await chatGroqJson(messages, { signal: opts.signal, temperature: opts.temperature });
     const parsed = parseModelOutput(result.content);
     if (!parsed.ok) throw new AiError("MALFORMED", parsed.reason);
 

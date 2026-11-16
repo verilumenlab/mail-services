@@ -1,10 +1,10 @@
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
 
-const FALLBACK_DB_URL = "postgresql://postgres.jnbkujuekofcabqzdksk:UAdMSkZhHjlOhw2m@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres?sslmode=require";
-
 function cleanUrl(url?: string): string {
-  if (!url) return FALLBACK_DB_URL;
+  if (!url) {
+    throw new Error("DATABASE_URL (or DATABASE_URL_UNPOOLED) is required for Prisma CLI.");
+  }
   let clean = url.trim();
   if ((clean.startsWith('"') && clean.endsWith('"')) || (clean.startsWith("'") && clean.endsWith("'"))) {
     clean = clean.slice(1, -1).trim();
@@ -13,7 +13,7 @@ function cleanUrl(url?: string): string {
     clean = clean.slice("DATABASE_URL=".length).trim();
   }
   if (!clean.startsWith("postgres")) {
-    return FALLBACK_DB_URL;
+    throw new Error("DATABASE_URL must be a postgresql:// connection string.");
   }
   return clean;
 }
@@ -24,6 +24,7 @@ export default defineConfig({
     path: "prisma/migrations",
   },
   datasource: {
-    url: cleanUrl(process.env.DATABASE_URL),
+    // Prefer direct (unpooled) for migrations; fall back to pooled DATABASE_URL.
+    url: cleanUrl(process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL),
   },
 });

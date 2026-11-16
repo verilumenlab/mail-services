@@ -15,6 +15,7 @@
     "db:check": "node --env-file=.env scripts/db-check.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:e2e": "node scripts/e2e.mjs",
+    "test:esign": "node scripts/esign-e2e.mjs",
     "test:license": "node scripts/license-e2e.mjs",
     "test:openrouter": "node scripts/openrouter-live.mjs",
     "desktop:prepare": "node scripts/desktop-prepare.mjs",
@@ -24,15 +25,23 @@
     "release": "node scripts/release.mjs"
   },
   "dependencies": {
+    "@neon/auth": "^0.8.2",
+    "@neon/config": "^1.14.0",
+    "@neon/env": "^2.1.3",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@react-three/fiber": "^9.8.1",
+    "@signpdf/placeholder-pdf-lib": "^4.0.0",
+    "@signpdf/signer-p12": "^4.0.0",
+    "@signpdf/signpdf": "^4.0.0",
     "exceljs": "^4.4.0",
     "fflate": "^0.8.3",
     "lucide-react": "^1.52.0",
     "next": "16.3.8",
+    "node-forge": "^1.4.3",
     "nodemailer": "^10.1.1",
     "papaparse": "^5.7.0",
+    "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^5.7.284",
     "pg": "^8.23.1",
     "react": "19.2.8",
@@ -68,5 +77,3 @@
     "electron@44.6.0": true
   }
 }
-
-

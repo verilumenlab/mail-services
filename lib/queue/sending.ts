@@ -1,4 +1,5 @@
 import "server-only";
+import { readFileSync } from "node:fs";
 import { validatePersonalization } from "@/lib/ai/personalization";
 import { db, Prisma } from "@/lib/database/prisma";
 import { providerForAccount } from "@/lib/email";
@@ -303,6 +304,7 @@ export async function getBulkSendSummary(userId: string, campaignId: string) {
     campaign: { id: campaign.id, campaignName: campaign.campaignName, status: campaign.status, sendIntervalSec: campaign.sendIntervalSec, scheduleTimezone: campaign.scheduleTimezone },
     sender: account ? { email: account.email, provider: account.provider, name: bulkSenderName(campaign) ?? account.displayName } : null,
     cc: campaign.ccEmails,
+    attachment: campaign.attachmentName,
     counts: { willSend, approved, pendingEligible, rejected, blocked, missingEmail, notGenerated, alreadySent, scheduled },
     confirmText: BULK_CONFIRM_TEXT,
     requireCount: willSend > BULK_COUNT_CONFIRM_THRESHOLD,
@@ -492,6 +494,16 @@ function bulkSenderName(campaign: Pick<Campaign, "kind" | "senderSnapshot">): st
   return campaign.kind === "BULK" ? (snapshotSender(campaign.senderSnapshot)?.senderName ?? null) : null;
 }
 
+function campaignAttachments(campaign: Pick<Campaign, "attachmentName" | "attachmentType" | "attachmentData" | "attachmentPath">) {
+  const content = campaign.attachmentPath
+    ? readFileSync(campaign.attachmentPath)
+    : campaign.attachmentData?.byteLength
+      ? Buffer.from(campaign.attachmentData)
+      : null;
+  if (!campaign.attachmentName || !content?.byteLength) return undefined;
+  return [{ filename: campaign.attachmentName, contentType: campaign.attachmentType || "application/octet-stream", content }];
+}
+
 export async function sendTestEmail(userId: string, campaignId: string, recipientId: string, to: string) {
   const campaign = await getOwnedCampaign(userId, campaignId);
   assertCanSend();
@@ -504,7 +516,7 @@ export async function sendTestEmail(userId: string, campaignId: string, recipien
   if (!cc.currentEmail) throw new AppError("INVALID_STATE", "Generate this email before sending a test.");
 
   // A test goes only to the address the user typed; the campaign CC list is not copied on tests.
-  const outgoing = { ...composeOutgoing({ account, contact: cc.contact, email: cc.currentEmail, senderName: bulkSenderName(campaign) }), to, cc: [] };
+  const outgoing = { ...composeOutgoing({ account, contact: cc.contact, email: cc.currentEmail, senderName: bulkSenderName(campaign), attachments: campaignAttachments(campaign) }), to, cc: [] };
   const record = await db().emailSend.create({
     data: {
       campaignId,
@@ -685,7 +697,7 @@ async function sendOne(
   }
 
   const problems = await verifyRecipient(cc, campaign);
-  const outgoing = composeOutgoing({ account, contact: cc.contact, email: cc.currentEmail, senderName: bulkSenderName(campaign), cc: campaign.ccEmails });
+  const outgoing = composeOutgoing({ account, contact: cc.contact, email: cc.currentEmail, senderName: bulkSenderName(campaign), cc: campaign.ccEmails, attachments: campaignAttachments(campaign) });
   if (outgoing.to !== cc.contact.email) problems.push("Outgoing address does not match the recipient row");
   if (problems.length) return fail(`Verification failed - not sent: ${problems.join("; ")}`, "verification_failed");
 

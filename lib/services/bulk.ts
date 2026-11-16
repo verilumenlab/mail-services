@@ -1,8 +1,11 @@
 import "server-only";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { autoMapBulkColumns, sanitizeBulkMapping, type BulkMapping } from "@/lib/bulk/fields";
+import { prepareAttachment } from "@/lib/email/attachment";
 import type { BulkSender } from "@/lib/bulk/placeholders";
 import { bulkRowStatus } from "@/lib/bulk/status";
-import { validateBulkRows } from "@/lib/bulk/validate";
+import { validateBulkRows, type BulkRow } from "@/lib/bulk/validate";
 import { isValidEmail } from "@/lib/csv/validate";
 import { db } from "@/lib/database/prisma";
 import { AppError } from "@/lib/errors";
@@ -18,6 +21,42 @@ import { assertCanRunCampaign, recordCampaignRun } from "./credits";
 export const BULK_MODEL = "template/placeholders";
 const EDIT_LOCKED: Campaign["status"][] = ["RUNNING", "SCHEDULED", "COMPLETED"];
 const LOCKED_ROW = ["SCHEDULED", "SENDING", "SENT"];
+
+function attachmentFilePath(campaignId: string, filename: string): string {
+  return path.join(process.cwd(), "data", "attachments", campaignId, filename.replace(/[\\/]/g, "_"));
+}
+
+export async function setCampaignAttachment(userId: string, campaignId: string, filename: string, bytes: Uint8Array) {
+  const campaign = await getOwnedBulkCampaign(userId, campaignId);
+  if (EDIT_LOCKED.includes(campaign.status)) throw new AppError("INVALID_STATE", "This campaign is sending or finished, so the attachment can no longer change.");
+  let prepared;
+  try {
+    prepared = prepareAttachment(filename, bytes.byteLength);
+  } catch (err) {
+    throw new AppError("VALIDATION", err instanceof Error ? err.message : "This file cannot be attached.");
+  }
+  const dest = attachmentFilePath(campaign.id, prepared.filename);
+  await mkdir(path.dirname(dest), { recursive: true });
+  await writeFile(dest, bytes);
+  if (campaign.attachmentPath && campaign.attachmentPath !== dest) await rm(campaign.attachmentPath, { force: true });
+  await db().campaign.update({
+    where: { id: campaign.id },
+    data: { attachmentName: prepared.filename, attachmentType: prepared.contentType, attachmentSize: prepared.size, attachmentPath: dest, attachmentData: null },
+  });
+  await logActivity({ category: "CAMPAIGN_STATE", userId, campaignId, message: `Attached ${prepared.filename} (${prepared.size} bytes) to every email` });
+  return { name: prepared.filename, size: prepared.size };
+}
+
+export async function clearCampaignAttachment(userId: string, campaignId: string) {
+  const campaign = await getOwnedBulkCampaign(userId, campaignId);
+  if (EDIT_LOCKED.includes(campaign.status)) throw new AppError("INVALID_STATE", "This campaign is sending or finished, so the attachment can no longer change.");
+  if (campaign.attachmentPath) await rm(campaign.attachmentPath, { force: true });
+  await db().campaign.update({
+    where: { id: campaign.id },
+    data: { attachmentName: null, attachmentType: null, attachmentSize: null, attachmentPath: null, attachmentData: null },
+  });
+  await logActivity({ category: "CAMPAIGN_STATE", userId, campaignId, message: "Removed the file attached to every email" });
+}
 
 export async function getOwnedBulkCampaign(userId: string, campaignId: string) {
   const campaign = await getOwnedCampaign(userId, campaignId);
@@ -52,6 +91,38 @@ export function checkBulkImport(input: { headers: string[]; rows: Record<string,
     issues: v.rows.filter((r) => r.errors.length || r.warnings.length).slice(0, 2000).map(strip),
     preview: v.rows.slice(0, 20).map(strip),
   };
+}
+
+/**
+ * Refreshes contacts that already have this address. One statement per chunk: a transaction of
+ * individual updates expires on a slow database (Prisma's default limit is 5 seconds).
+ */
+async function refreshImportedContacts(rows: BulkRow[], existing: Map<string, string>): Promise<void> {
+  for (let i = 0; i < rows.length; i += 200) {
+    const chunk = rows.slice(i, i + 200);
+    const ids = chunk.map((r) => existing.get(r.email!)!);
+    const toNames = chunk.map((r) => r.toName);
+    const companies = chunk.map((r) => r.companyName);
+    const fromNames = chunk.map((r) => r.fromName);
+    const extras = chunk.map((r) => (Object.keys(r.extra).length ? JSON.stringify(r.extra) : ""));
+    await db().$executeRaw`
+      UPDATE contacts AS c
+      SET to_person_name = s.to_name,
+          company_name = s.company_name,
+          from_person_name = NULLIF(s.from_name, ''),
+          custom_fields = CASE WHEN s.extra = '' THEN c.custom_fields ELSE s.extra::jsonb END,
+          updated_at = now()
+      FROM (
+        SELECT * FROM unnest(
+          ${ids}::text[],
+          ${toNames}::text[],
+          ${companies}::text[],
+          ${fromNames}::text[],
+          ${extras}::text[]
+        ) AS u(id, to_name, company_name, from_name, extra)
+      ) AS s
+      WHERE c.id = s.id`;
+  }
 }
 
 /** Creates a campaign from the valid rows of the contact file. */
@@ -102,10 +173,10 @@ export async function importBulkCampaign(
     fromPersonName: r.fromName || null,
     customFields: (Object.keys(r.extra).length ? r.extra : undefined) as Prisma.InputJsonObject | undefined,
   });
-  for (let i = 0; i < valid.length; i += 100) {
-    const chunk = valid.slice(i, i + 100).filter((r) => existing.has(r.email!));
-    if (chunk.length) await db().$transaction(chunk.map((r) => db().contact.update({ where: { id: existing.get(r.email!)! }, data: fields(r) })));
-  }
+  await refreshImportedContacts(
+    valid.filter((r) => existing.has(r.email!)),
+    existing,
+  );
   const toCreate = valid.filter((r) => !existing.has(r.email!));
   for (let i = 0; i < toCreate.length; i += 500) {
     const chunk = toCreate.slice(i, i + 500);
@@ -287,6 +358,7 @@ export async function getBulkOverview(userId: string, campaignId: string) {
       aiInstructions: campaign.aiInstructions,
       productLineFallback: campaign.productLineFallback,
       ccEmails: campaign.ccEmails,
+      attachment: campaign.attachmentName ? { name: campaign.attachmentName, size: campaign.attachmentSize ?? 0 } : null,
       senderProfileId: campaign.senderProfileId,
       templateId: campaign.templateId,
       generationPaused: campaign.generationPaused,

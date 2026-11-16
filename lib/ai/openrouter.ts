@@ -4,7 +4,6 @@ import { parseRetryAfter } from "@/lib/queue/backoff";
 import type { BuiltPrompt } from "./prompt";
 import { parseModelOutput } from "./schema";
 import { AiError, type AiAttemptResult, type AiProvider, type GenerateOptions } from "./types";
-import { groqProvider } from "./groq";
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -24,6 +23,7 @@ export interface ChatJsonOptions {
   signal?: AbortSignal;
   temperature?: number;
   maxTokens?: number;
+  apiKey?: string;
 }
 
 export interface ChatJsonResult {
@@ -41,7 +41,8 @@ const noJsonModeModels = new Set<string>();
 /** Server-side OpenRouter chat call in JSON mode, with timeout and typed errors. Never logs the key. */
 export async function chatJson(messages: ChatMessage[], opts: ChatJsonOptions = {}): Promise<ChatJsonResult> {
   const e = env();
-  if (!e.OPENROUTER_API_KEY) throw new AiError("NOT_CONFIGURED", "OPENROUTER_API_KEY is not set");
+  const apiKey = opts.apiKey || e.OPENROUTER_API_KEY;
+  if (!apiKey) throw new AiError("NOT_CONFIGURED", "OPENROUTER_API_KEY is not set");
   const model = e.OPENROUTER_MODEL;
 
   const call = async (useJsonMode: boolean) => {
@@ -54,7 +55,7 @@ export async function chatJson(messages: ChatMessage[], opts: ChatJsonOptions = 
         method: "POST",
         signal: controller.signal,
         headers: {
-          Authorization: `Bearer ${e.OPENROUTER_API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
           "HTTP-Referer": e.APP_URL,
           "X-Title": "Sorts",
@@ -97,6 +98,7 @@ export async function chatJson(messages: ChatMessage[], opts: ChatJsonOptions = 
   if (!res.ok) {
     const msg = data?.error?.message?.slice(0, 300) ?? `HTTP ${res.status}`;
     const retryAfterMs = parseRetryAfter(res.headers.get("retry-after")) ?? undefined;
+    if (/credit|afford|quota|insufficient|billing/i.test(msg)) throw new AiError("CREDITS", msg, { httpStatus: res.status, retryAfterMs });
     if (res.status === 429) throw new AiError("RATE_LIMIT", msg, { httpStatus: 429, retryAfterMs });
     if (res.status === 401 || res.status === 403) throw new AiError("AUTH", msg, { httpStatus: res.status });
     if (res.status === 402) throw new AiError("CREDITS", msg, { httpStatus: 402 });
@@ -146,25 +148,16 @@ export const openRouterProvider: AiProvider = {
       });
     }
 
-    try {
-      const result = await chatJson(messages, { signal: opts.signal });
-      const parsed = parseModelOutput(result.content);
-      if (!parsed.ok) throw new AiError("MALFORMED", parsed.reason);
+    const result = await chatJson(messages, { signal: opts.signal, temperature: opts.temperature });
+    const parsed = parseModelOutput(result.content);
+    if (!parsed.ok) throw new AiError("MALFORMED", parsed.reason);
 
-      return {
-        content: parsed.value,
-        model: result.model,
-        promptTokens: result.promptTokens,
-        completionTokens: result.completionTokens,
-        latencyMs: result.latencyMs,
-      };
-    } catch (err) {
-      const e = env();
-      if (e.GROQ_API_KEY) {
-        console.warn(`[AI] OpenRouter failed (${err instanceof Error ? err.message : String(err)}). Falling back to Groq API (${e.GROQ_MODEL})...`);
-        return await groqProvider.generate(prompt, opts);
-      }
-      throw err;
-    }
+    return {
+      content: parsed.value,
+      model: result.model,
+      promptTokens: result.promptTokens,
+      completionTokens: result.completionTokens,
+      latencyMs: result.latencyMs,
+    };
   },
 };

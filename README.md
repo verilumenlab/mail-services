@@ -97,6 +97,12 @@ All variables are read only on the server (`lib/env.ts`, a `server-only` module)
 | `MAX_EMAIL_RETRIES` | no (3) | Retries for transient send failures |
 | `AI_PROVIDER` / `EMAIL_PROVIDER` | no | `mock` for development testing only. **Forced to real providers when `NODE_ENV=production`** |
 | `DISABLE_QUEUE_WORKER` | no | `true` disables the background worker in this process |
+| `ESIGN_STORAGE_DIR` | no (`./data/esign`) | Where encrypted e-signature files (originals, signed PDFs, certificates) are stored. Must be persistent and backed up |
+| `LIBREOFFICE_PATH` | no | Path to `soffice`. Without LibreOffice, DOCX uploads are refused with a clear message and PDFs still work |
+| `ESIGN_SMS_PROVIDER` | no | `twilio` or `msg91` enables the optional SMS one-time code. Twilio: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`. MSG91: `MSG91_AUTH_KEY`, `MSG91_TEMPLATE_ID` |
+| `ESIGN_PDF_SIGNER` | no | `p12` adds a certificate-based digital signature to completed PDFs, using `ESIGN_P12_PATH`, `ESIGN_P12_PASSPHRASE` and `ESIGN_P12_LABEL` |
+| `ESIGN_ESP_*` | no | Indian Aadhaar eSign (ESP) adapter: `ESIGN_ESP_NAME`, `ESIGN_ESP_GATEWAY_URL`, `ESIGN_ESP_ASP_ID`, `ESIGN_ESP_ASP_KEY_PEM`, `ESIGN_ESP_CERT_PEM`. Needs a signed agreement with a licensed ESP |
+| `ESIGN_DEV_OUTBOX` | no | Development only: writes every e-signature email as JSON to this folder (used by `npm run test:esign`). Ignored when `NODE_ENV=production` |
 
 Generate the secrets with:
 
@@ -161,6 +167,23 @@ How generation works:
   - Invalid-key or no-credit errors pause the queue with a clear message instead of failing every contact.
 - Each generated email stores the model, prompt version, timestamp and full prompt snapshot. Editing the campaign prompt bumps the prompt version but never changes already generated emails.
 
+## 7a. E-Signature
+
+The **E-Signature** section (`/esign`) sends documents for review and signature, using the same account, database, Gmail connection and worker as campaigns.
+
+1. **Upload** a PDF or DOCX (DOCX is converted to PDF with LibreOffice). Files are stored encrypted (AES-256-GCM with `TOKEN_ENCRYPTION_KEY`) under `ESIGN_STORAGE_DIR`, with their SHA-256 hash. Storage paths are never sent to the browser; files are served only through routes that check the signed-in owner or the recipient's link.
+2. **New signing request**: add recipients (signer, approver, CC), a signing order (one after another, or all at once), an expiry, reminders and a message.
+3. **Place fields** (signature, initials, date, name, text) on the pages by dragging or tapping, and assign each field to a signer.
+4. **Send**: each signer gets a "Review Document" email with a private link. Links are random tokens stored only as hashes, scoped to one recipient, and stop working after signing, declining, cancelling or expiry.
+5. The signer opens `/sign/<token>`, scrolls through every page, agrees to sign electronically, confirms an email one-time code (plus SMS when configured), then draws, types or uploads a signature and signs. They can also decline with a reason.
+6. When everyone has signed, the worker stamps the signatures into the PDF, appends a **completion certificate** (hashes, signer timestamps, IPs, the event timeline) and emails the signed PDF and certificate to the sender, signers and CC recipients.
+
+Every step is recorded in an append-only audit log: database triggers refuse updates and deletes, and entries form a SHA-256 hash chain that the request page verifies (**Activity → Audit trail**). Requests therefore cannot be deleted; unsent drafts are discarded as cancelled.
+
+The worker checks e-signature work about once a minute: expiry, reminders, retrying failed notification emails, and finalizing completed requests.
+
+What the signature means: by default this is an **electronic signature** (consent + email one-time code + audit trail). It is not a certificate-based digital signature unless `ESIGN_PDF_SIGNER=p12` is configured, and it is not Aadhaar eSign unless an ESP is configured (`ESIGN_ESP_*`). The certificate states which method was used.
+
 ---
 
 ## 8. Development commands
@@ -196,14 +219,31 @@ npm run build
 NODE_ENV=production npm run start      # listens on PORT (default 3000)
 ```
 
+### Docker
+
+The `Dockerfile` builds a production image with LibreOffice and fonts (for DOCX conversion). On start it runs `prisma migrate deploy`, then `next start`, so the worker runs inside the container.
+
+```bash
+docker build -t sorts .
+docker run -d -p 3000:3000 --env-file .env.production -v sorts-data:/app/data --name sorts sorts
+```
+
+- Mount a persistent volume on `/app/data`. It holds the encrypted e-signature files (`ESIGN_STORAGE_DIR=/app/data/esign`). Losing it loses every uploaded and signed document. Back it up together with the database, and keep `TOKEN_ENCRYPTION_KEY` unchanged, because it encrypts these files.
+- Put an HTTPS reverse proxy in front (Caddy, nginx, or the host's load balancer) that sets `X-Forwarded-For`.
+
+`netlify.toml` targets Netlify functions, which are serverless. They cannot run the background worker, so campaigns, e-signature reminders, expiry, notification retries and finalization would not run there. Use Docker or another long-running Node host instead.
+
 Production checklist:
 
-- [ ] `APP_URL` is your HTTPS URL. Session cookies are `Secure` in production.
+- [ ] `APP_URL` is your public HTTPS URL. Signing links in e-signature emails are built from it, so recipients must be able to open it from the internet.
 - [ ] `GOOGLE_REDIRECT_URI` uses the production domain and is registered in Google Cloud.
 - [ ] Strong, unique `SESSION_SECRET` and `TOKEN_ENCRYPTION_KEY`, stored in your host's secret manager.
 - [ ] `ALLOW_REGISTRATION=false` once your account exists.
 - [ ] The app is behind a reverse proxy that sets `X-Forwarded-For`, which is used for per-IP rate limiting on login and registration.
 - [ ] Mock providers are automatically disabled when `NODE_ENV=production`.
+- [ ] `ESIGN_STORAGE_DIR` is on persistent, backed-up storage.
+- [ ] LibreOffice is installed (included in the Docker image) if DOCX uploads are needed.
+- [ ] `ESIGN_DEV_OUTBOX` is not set.
 
 On startup the worker recovers interrupted work:
 
@@ -342,6 +382,14 @@ npm run test:e2e    # 93 checks across the full send flow
 npm run db:check    # DB-level integrity
 ```
 
+E-signature end-to-end test (NDA with two sequential signers, link security, OTP, signing, final PDF and certificate, emails, audit chain, decline, cancel, resend, bounce, expiry). Start the dev server with a dev outbox, then point the script at the same folder:
+
+```powershell
+$env:ESIGN_DEV_OUTBOX="$env:TEMP\esign-outbox"; npm run dev
+# another terminal; DATABASE_URL lets the script check the audit triggers and run expiry
+$env:ESIGN_DEV_OUTBOX="$env:TEMP\esign-outbox"; $env:DATABASE_URL="<same as the server>"; npm run test:esign -- http://localhost:3000
+```
+
 Subscription checks. Neither needs the dev server or touches your data: each starts its own temporary PostgreSQL.
 
 ```bash
@@ -386,7 +434,34 @@ Mock emails are labelled `[MOCK EMAIL - development only]`, and a banner is show
 
 ---
 
-## 11. Security summary
+## 11. External Send API
+
+Other applications can send one email at a time through your connected Gmail/SMTP account.
+
+1. Sign in to Sorts → **Settings → Send API keys** → create a key (shown once).
+2. Connect a sending account under **Sending account**.
+3. Call:
+
+```http
+POST /api/v1/send
+Authorization: Bearer srots_your_key
+Content-Type: application/json
+
+{
+  "to": "client@example.com",
+  "subject": "Hello",
+  "body": "Plain text body",
+  "html": "<p>Optional HTML</p>",
+  "cc": ["copy@example.com"],
+  "fromName": "Optional From name"
+}
+```
+
+Successful response includes `{ id, to, subject, from }` where `id` is the provider message id.
+
+Manage keys with session-authenticated `GET/POST /api/v1/api-keys` and `DELETE /api/v1/api-keys/:id`.
+
+## 12. Security summary
 
 - The OpenRouter key and the Google client secret and refresh tokens are server-only. OAuth tokens are encrypted at rest with AES-256-GCM.
 - Passwords are hashed with scrypt. Sessions are random tokens stored as SHA-256 hashes, in an `httpOnly` `SameSite=Lax` cookie.
@@ -398,12 +473,15 @@ Mock emails are labelled `[MOCK EMAIL - development only]`, and a banner is show
 - CSV input is sanitized (control characters, length limits), and the export neutralizes spreadsheet formulas.
 - All database access goes through Prisma with parameterized queries.
 
-## 12. Known limitations
+## 13. Known limitations
 
-- Emails are sent as **plain text** (no HTML templates, attachments or open/click tracking). This is deliberate, for deliverability and XSS safety.
+- Campaign emails are sent as **plain text** (no HTML templates, attachments or open/click tracking). This is deliberate, for deliverability and XSS safety. Only e-signature notifications use HTML and attachments.
 - **Gmail only** for now. The `EmailProvider` interface (`lib/email/provider.ts`) is ready for a Microsoft Graph provider, but it is not implemented.
 - Needs a long-running Node process; serverless hosting is not supported (see section 9).
 - No bounce or reply ingestion. Only errors returned synchronously by Gmail are recorded. Asynchronous bounces arrive in your inbox.
 - Gmail daily sending quotas and Google's 7-day refresh-token expiry in Testing mode apply.
 - Rate limiting is per user or IP using fixed windows in Postgres. It is fine for a single-tenant deployment but not a substitute for an edge WAF.
 - Single-user oriented: each account has its own contacts and campaigns, and there are no team or shared workspaces.
+- E-signature emails are HTML; "delivered" means Gmail accepted the message, not that it reached the inbox.
+- The PDF stamping fonts cover Latin text only. Other scripts in typed names or text fields are replaced with `?` in the signed PDF.
+- DOCX conversion needs LibreOffice on the server. The Windows desktop installer does not include it, so desktop users should upload PDFs.

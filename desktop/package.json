@@ -1,7 +1,7 @@
 {
   "name": "email-campaign-manager-desktop",
   "productName": "Sorts",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Sorts: AI-personalised email campaigns you review, sent from your own Gmail.",
   "author": "Sorts",
   "private": true,

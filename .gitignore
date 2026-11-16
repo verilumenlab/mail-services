@@ -34,6 +34,7 @@
 *.pem
 .cursor/
 *.exe
+/data/
 
 # debug
 npm-debug.log*
@@ -57,3 +58,7 @@ yarn-error.log*
 next-env.d.ts
 /portal/.localdb/
 /desktop/license-config.json
+.neon
+
+# Local Netlify folder
+.netlify

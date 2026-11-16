@@ -14,9 +14,23 @@ const nextConfig: NextConfig = {
   output: desktopBuild ? "standalone" : undefined,
   distDir: desktopBuild ? ".next-desktop" : ".next",
   poweredByHeader: false,
-  serverExternalPackages: ["pg", "@prisma/adapter-pg", "@prisma/client", "exceljs"],
+  serverExternalPackages: ["pg", "@prisma/adapter-pg", "@prisma/client", "exceljs", "sharp", "node-forge", "@signpdf/signpdf", "@signpdf/signer-p12", "@signpdf/placeholder-pdf-lib", "@signpdf/utils"],
+  experimental: {
+    // The app proxy otherwise rejects request bodies over 10 MB. Campaign attachments allow 100 MB.
+    proxyClientMaxBodySize: "100mb",
+  },
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
+    return [
+      { source: "/:path*", headers: securityHeaders },
+      {
+        // Signing links carry a secret token in the path; never leak it through Referer.
+        source: "/sign/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+    ];
   },
 };
 

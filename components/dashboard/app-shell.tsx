@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useSyncExternalStore, type ReactNode } from "react";
-import { ChevronRight, LayoutDashboard, List, LogOut, Mail, Menu, PanelLeft, Plus, Rows3, Rows4, Search, Send, Settings } from "lucide-react";
+import { ChevronRight, FilePenLine, FilePlus, LayoutDashboard, List, LogOut, Mail, Menu, PanelLeft, Plus, Rows3, Rows4, Search, Send, Settings } from "lucide-react";
 import { LicenseBanner } from "@/components/license/license-notice";
 import { SortsLogo, SortsMark } from "@/components/sorts/logo";
 import { ThemeSwitcher } from "@/components/theme/theme-switcher";
@@ -33,6 +33,13 @@ const GROUPS: { label: string; items: NavItem[] }[] = [
     items: [
       { href: "/sending", label: "Delivery & Sent Mail", icon: Send, exact: true },
       { href: "/sending/accounts", label: "Sending Accounts", icon: Mail, exact: true },
+    ],
+  },
+  {
+    label: "E-Signature",
+    items: [
+      { href: "/esign", label: "Documents & Requests", icon: FilePenLine, exact: false },
+      { href: "/esign/requests/new", label: "New signing request", icon: FilePlus, exact: true },
     ],
   },
   { label: "Workspace", items: [{ href: "/settings", label: "Settings", icon: Settings, exact: true }] },
@@ -65,6 +72,7 @@ function isMac(): boolean {
 function isActive(pathname: string, href: string, exact: boolean): boolean {
   if (exact) return pathname === href;
   if (href === "/campaigns" && pathname === "/campaigns/new") return false;
+  if (href === "/esign" && pathname === "/esign/requests/new") return false;
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
@@ -75,6 +83,19 @@ function crumbsFor(pathname: string, names: Map<string, string>): { href: string
   if (pathname === "/sending/accounts") return [{ href: "/sending", label: "Sending" }, { href: "/sending/accounts", label: "Sending Accounts" }];
   if (pathname === "/settings") return [{ href: "/settings", label: "Settings" }];
   if (pathname === "/campaigns/new") return [campaigns, { href: pathname, label: "New campaign" }];
+  if (pathname === "/esign" || pathname.startsWith("/esign/")) {
+    const esign = { href: "/esign", label: "E-Signature" };
+    if (pathname === "/esign") return [esign];
+    if (pathname === "/esign/requests/new") return [esign, { href: pathname, label: "New signing request" }];
+    if (pathname.startsWith("/esign/documents/")) return [esign, { href: pathname, label: "Document" }];
+    const req = pathname.match(/^\/esign\/requests\/([^/]+)(\/edit)?$/);
+    if (req) {
+      const crumbs = [esign, { href: `/esign/requests/${req[1]}`, label: "Signing request" }];
+      if (req[2]) crumbs.push({ href: pathname, label: "Edit draft" });
+      return crumbs;
+    }
+    return [esign];
+  }
   const step = pathname.match(/^\/campaigns\/([^/]+)(?:\/bulk\/([^/]+))?$/);
   if (step) {
     const crumbs = [campaigns, { href: `/campaigns/${step[1]}`, label: names.get(step[1]) ?? "Campaign" }];

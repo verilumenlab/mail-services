@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { composeOutgoing } from "@/lib/email/compose";
+import { emphasisParts, htmlBody } from "@/lib/email/emphasis";
 import { cn } from "@/lib/utils";
 
 export interface PreviewAccount {
@@ -17,6 +18,7 @@ export interface PreviewProps {
   email: { subject: string; body: string };
   senderName?: string | null;
   cc?: string[] | null;
+  attachmentName?: string | null;
 }
 
 function initials(s: string): string {
@@ -29,10 +31,14 @@ function initials(s: string): string {
 }
 
 /**
- * Renders the exact plain-text message that will be sent. Content is rendered as React text
- * nodes (never as HTML), so generated or edited content cannot inject markup or scripts.
+ * Renders the message the recipient receives. Highlight markers become bold text nodes,
+ * never HTML from the model, so generated content cannot inject markup.
  */
-export function EmailPreview({ account, contact, email, senderName, cc }: PreviewProps) {
+export function EmphasizedText({ text }: { text: string }) {
+  return emphasisParts(text).map((part, i) => (part.strong ? <strong key={i}>{part.text}</strong> : <span key={i}>{part.text}</span>));
+}
+
+export function EmailPreview({ account, contact, email, senderName, cc, attachmentName }: PreviewProps) {
   const [mode, setMode] = useState<"desktop" | "mobile">("desktop");
   const msg = composeOutgoing({
     account: account ?? { email: "not-connected@sender", displayName: null },
@@ -92,17 +98,22 @@ export function EmailPreview({ account, contact, email, senderName, cc }: Previe
               </div>
             </div>
           </div>
-          <div
-            className={cn(
-              "whitespace-pre-wrap break-words font-[Arial,Helvetica,sans-serif] leading-relaxed text-zinc-800",
-              mode === "mobile" ? "px-4 py-4 text-sm" : "px-6 py-6 text-[0.9375rem]",
-            )}
-          >
-            {msg.body}
-          </div>
+          <iframe
+            title="Designed email"
+            sandbox=""
+            srcDoc={htmlBody(msg.body)}
+            className={cn("w-full border-0 bg-[#f3f5fb]", mode === "mobile" ? "h-[560px]" : "h-[720px]")}
+          />
+          {attachmentName && (
+            <div className="border-t border-zinc-200 px-6 py-3 text-xs text-zinc-700" data-testid="preview-attachment">
+              Attachment: {attachmentName}
+            </div>
+          )}
         </div>
       </div>
-      <p className="text-center type-hint text-subtle">Sent as plain text (UTF-8). What you see here is exactly what the recipient receives.</p>
+      <p className="text-center type-hint text-subtle">
+        {attachmentName ? `Sent with ${attachmentName} attached. The message uses the designed layout. The file is not changed.` : "The recipient receives this designed layout. Highlighted phrases are bold."}
+      </p>
     </div>
   );
 }

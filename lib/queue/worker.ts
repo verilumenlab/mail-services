@@ -4,12 +4,15 @@ import { join } from "node:path";
 import { db } from "@/lib/database/prisma";
 import { env } from "@/lib/env";
 import { errorMessage } from "@/lib/errors";
+import { esignTick } from "@/lib/esign/scheduler";
 import { generationTick, recoverStaleGeneration } from "./generation";
 import { recoverStaleSending, sendingTick } from "./sending";
 
 /** Scheduled emails go out within one tick of their scheduled time. */
 const TICK_MS = 2000;
 const RECOVERY_MS = 60_000;
+/** E-signature reminders, expiry, email retries and stuck finalisation. */
+const ESIGN_MS = 60_000;
 
 interface WorkerState {
   started: boolean;
@@ -17,10 +20,24 @@ interface WorkerState {
   ticking: boolean;
   pending: boolean;
   lastRecovery: number;
+  lastEsign?: number;
+  esignRunning?: boolean;
 }
 
 const g = globalThis as unknown as { __campaignWorker?: WorkerState };
 const worker: WorkerState = (g.__campaignWorker ??= { started: false, ticking: false, pending: false, lastRecovery: 0 });
+
+/** Runs beside the campaign tick so slow e-sign work (PDF finalisation, SMTP) never delays scheduled sends. */
+function maybeEsignTick(): void {
+  if (worker.esignRunning || Date.now() - (worker.lastEsign ?? 0) < ESIGN_MS) return;
+  worker.esignRunning = true;
+  worker.lastEsign = Date.now();
+  esignTick()
+    .catch((err) => console.error("[worker] e-sign tick failed:", errorMessage(err)))
+    .finally(() => {
+      worker.esignRunning = false;
+    });
+}
 
 async function tick(): Promise<void> {
   if (worker.ticking) {
@@ -35,6 +52,7 @@ async function tick(): Promise<void> {
       await recoverStaleGeneration();
       await recoverStaleSending();
     }
+    maybeEsignTick();
     await generationTick(kickWorker);
     await sendingTick(kickWorker);
   } catch (err) {

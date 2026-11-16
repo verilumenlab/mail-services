@@ -1,7 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 const SESSION_COOKIE = "ecm_session";
-const PUBLIC_PATHS = ["/login", "/register"];
+const PUBLIC_PATHS = ["/login", "/register", "/auth/sign-in", "/auth/sign-up", "/auth/me"];
+/** Recipient signing pages: authorised by the link token, never by an app session. */
+const SIGNER_PATHS = ["/sign"];
 
 function autoLoginEnabled(): boolean {
   if (process.env.DESKTOP_MODE?.toLowerCase() === "true") return true;
@@ -14,6 +16,7 @@ function autoLoginEnabled(): boolean {
  */
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  if (SIGNER_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) return NextResponse.next();
   const hasSession = request.cookies.has(SESSION_COOKIE);
   const isPublic = PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 

@@ -16,6 +16,7 @@ import { getActiveEmailAccount, getProviderSettings } from "@/lib/services/provi
 import { getGroqStatus } from "@/lib/services/groq-settings";
 import { formatDuration } from "@/lib/utils";
 import { UserBillingCard } from "@/components/dashboard/user-billing-card";
+import { ApiKeysCard } from "@/components/dashboard/api-keys-card";
 
 export const metadata: Metadata = { title: "Settings" };
 
@@ -45,6 +46,7 @@ export default async function SettingsPage() {
       ? [{ id: "upi-payments", label: "UPI & Pricing (Admin)" }]
       : [{ id: "billing", label: "Credits & Payment" }]),
     { id: "sending-account", label: "Sending account" },
+    { id: "api-keys", label: "Send API keys" },
     { id: "sender-profiles", label: "Sender profiles" },
     { id: "ai", label: "AI model" },
     { id: "limits", label: "Sending limits" },
@@ -92,6 +94,9 @@ export default async function SettingsPage() {
             <Suspense fallback={<LoadingState variant="form" message="Loading sending account" />}>
               <EmailAccountCard account={account} providerMode={settings.email} googleConfigured={googleConfigured} />
             </Suspense>
+          </Section>
+          <Section id="api-keys">
+            <ApiKeysCard />
           </Section>
           <Section id="sender-profiles">
             <Card>

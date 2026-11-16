@@ -3,6 +3,9 @@ import nodemailer from "nodemailer";
 import { decryptSecret } from "@/lib/crypto/tokens";
 import { db } from "@/lib/database/prisma";
 import type { EmailAccount } from "@/lib/generated/prisma/client";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { htmlBody, LETTER_LOGO_CID, letterPlain } from "./emphasis";
 import { ProviderError, type EmailProvider, type OutgoingEmail, type ProviderAccount, type SendResult } from "./provider";
 
 export interface SmtpOptions {
@@ -66,12 +69,20 @@ export class SmtpEmailProvider implements EmailProvider {
         ? `"${message.from.name}" <${message.from.email || this.account.email}>`
         : message.from.email || this.account.email;
 
+      const html = message.html ?? htmlBody(message.body, `cid:${LETTER_LOGO_CID}`);
       const info = await transporter.sendMail({
         from: fromDisplay,
         to: message.to,
         cc: message.cc && message.cc.length > 0 ? message.cc : undefined,
         subject: message.subject,
-        text: message.body,
+        text: message.html ? message.body : letterPlain(message.body),
+        html,
+        attachments: [
+          ...(html.includes(`cid:${LETTER_LOGO_CID}`)
+            ? [{ filename: "logo.png", content: readFileSync(join(process.cwd(), "public", "brand", "verilumen-logo.png")), contentType: "image/png", cid: LETTER_LOGO_CID }]
+            : []),
+          ...(message.attachments?.map((file) => ({ filename: file.filename, content: file.content, contentType: file.contentType })) ?? []),
+        ],
       });
 
       return { providerMessageId: info.messageId || `smtp-${Date.now()}` };

@@ -5,7 +5,7 @@ import { SortsLogo } from "@/components/sorts/logo";
 import { ThemeSwitcher } from "@/components/theme/theme-switcher";
 
 const PROMISES = [
-  { icon: PenLine, title: "Your email, fitted to each contact", body: "The AI makes light edits per row and keeps your format and meaning. If it can't, your original text is used." },
+  { icon: PenLine, title: "Your email, fitted to each contact", body: "The AI rewrites each email into professional English and keeps your facts. If it can't, your original text is used." },
   { icon: CheckCheck, title: "Nothing sends without you", body: "Every email is reviewed and approved before it goes out, one recipient per email." },
   { icon: KeyRound, title: "Sent from your own Gmail", body: "Connected with Google sign-in and send-only access. Your password is never stored." },
 ];

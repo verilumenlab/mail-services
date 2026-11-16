@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getSession, type ActiveSession, type SessionUser } from "@/lib/auth/session";
 import { assertCsrfToken, assertSameOrigin, isMutation } from "@/lib/auth/csrf";
 import { enforceRateLimit, RATE_LIMITS, type RateLimitRule } from "@/lib/auth/rateLimit";
+import { resolveApiKeyUser } from "@/lib/api/api-key";
 import { AppError } from "@/lib/errors";
 import { Prisma } from "@/lib/generated/prisma/client";
 import { redactString } from "@/lib/services/logs";
@@ -16,6 +17,10 @@ export interface ApiContext<P> {
 export interface AuthedContext<P> extends ApiContext<P> {
   user: SessionUser;
   session: ActiveSession;
+}
+
+export interface ApiKeyContext<P> extends ApiContext<P> {
+  user: SessionUser;
 }
 
 interface Options {
@@ -102,6 +107,24 @@ export function authedRoute<P = Record<string, never>>(
       }
       await enforceRateLimit(options.rateLimit ?? RATE_LIMITS.api, `user:${session.user.id}`);
       return await handler({ req, params: await ctx.params, user: session.user, session });
+    } catch (err) {
+      return toErrorResponse(err);
+    }
+  };
+}
+
+/**
+ * External API auth via Bearer API key. Skips CSRF / same-origin so other apps can call it.
+ */
+export function apiKeyRoute<P = Record<string, never>>(
+  options: Options,
+  handler: (ctx: ApiKeyContext<P>) => Promise<Response>,
+): RouteHandler<P> {
+  return async (req, ctx) => {
+    try {
+      const user = await resolveApiKeyUser(req);
+      await enforceRateLimit(options.rateLimit ?? RATE_LIMITS.send, `apikey:${user.id}`);
+      return await handler({ req, params: await ctx.params, user });
     } catch (err) {
       return toErrorResponse(err);
     }

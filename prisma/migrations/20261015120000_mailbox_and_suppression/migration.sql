@@ -1,4 +1,4 @@
-﻿-- CreateEnum
+-- CreateEnum
 CREATE TYPE "MailFolder" AS ENUM ('INBOX', 'SENT', 'DRAFTS', 'STARRED', 'SNOOZED', 'ARCHIVE', 'SPAM', 'TRASH');
 
 -- CreateEnum

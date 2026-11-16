@@ -4,8 +4,12 @@ export interface OutgoingEmail {
   /** Copied on this one email; never another recipient of the campaign. */
   cc?: string[];
   subject: string;
-  /** Plain-text body; sent exactly as previewed. */
+  /** Body as stored. Phrases wrapped in **double asterisks** are bold in the HTML part and the preview. */
   body: string;
+  /** Complete HTML part. When set, `body` is sent verbatim as the plain-text part and no letter styling is applied. */
+  html?: string;
+  /** Files sent unchanged with this email. */
+  attachments?: { filename: string; contentType: string; content: Buffer }[];
 }
 
 export interface SendResult {

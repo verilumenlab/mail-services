@@ -8,10 +8,11 @@ export interface ComposeInput {
   senderName?: string | null;
   /** Campaign CC list, copied on every email. */
   cc?: string[] | null;
+  attachments?: OutgoingEmail["attachments"];
 }
 
 /** Single source of truth for the message that is previewed and the message that is sent. */
-export function composeOutgoing({ account, contact, email, senderName, cc }: ComposeInput): OutgoingEmail {
+export function composeOutgoing({ account, contact, email, senderName, cc, attachments }: ComposeInput): OutgoingEmail {
   const to = contact.email ?? "";
   return {
     from: { email: account.email, name: contact.fromPersonName?.trim() || senderName?.trim() || account.displayName || null },
@@ -19,5 +20,6 @@ export function composeOutgoing({ account, contact, email, senderName, cc }: Com
     cc: (cc ?? []).filter((a) => a && a.toLowerCase() !== to.toLowerCase()),
     subject: email.subject,
     body: email.body,
+    ...(attachments?.length ? { attachments } : {}),
   };
 }

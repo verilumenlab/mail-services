@@ -220,6 +220,9 @@ export function BulkSendStep({ campaignId, overview, refresh }: StepProps) {
             <p className="text-sm" data-testid="bulk-send-cc">
               CC on every email: <strong>{summary.cc.length ? summary.cc.join(", ") : "none"}</strong>
             </p>
+            <p className="text-sm" data-testid="bulk-send-attachment">
+              File attached to every email: <strong>{summary.attachment ?? "none"}</strong>
+            </p>
           </>
         )}
       </CardBody>
@@ -230,7 +233,7 @@ export function BulkSendStep({ campaignId, overview, refresh }: StepProps) {
           onClose={() => setOpen(false)}
           size="lg"
           title="Confirm and send"
-          description={`${c!.willSend} separate emails will be sent from ${summary.sender?.email ?? "(not connected)"}${summary.cc.length ? `, each with CC ${summary.cc.join(", ")}` : ""}. Rejected and invalid rows are excluded.`}
+          description={`${c!.willSend} separate emails will be sent from ${summary.sender?.email ?? "(not connected)"}${summary.cc.length ? `, each with CC ${summary.cc.join(", ")}` : ""}${summary.attachment ? `, each with ${summary.attachment} attached` : ""}. Rejected and invalid rows are excluded.`}
           footer={
             <>
               <Button variant="ghost" onClick={() => setOpen(false)}>

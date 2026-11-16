@@ -188,8 +188,30 @@ model User {
   senderProfiles    SenderProfile[]
   campaignTemplates CampaignTemplate[]
   upiPayments       UpiPayment[]
+  documents         Document[]
+  signatureRequests SignatureRequest[]
+  apiKeys           ApiKey[]
 
   @@map("users")
+}
+
+/// External API keys for other applications to send mail. Raw key is shown once; only the hash is stored.
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  name       String
+  /// SHA-256 of the raw key (srots_...).
+  keyHash    String    @unique @map("key_hash")
+  /// First characters of the raw key for display in Settings.
+  keyPrefix  String    @map("key_prefix")
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("api_keys")
 }
 
 model UpiPayment {
@@ -321,6 +343,13 @@ model Campaign {
   templateId          String?      @map("template_id")
   /// Copied on every email of the campaign (one email per recipient, same CC on each).
   ccEmails            String[]     @default([]) @map("cc_emails")
+  /// One file attached, unchanged, to every email of the campaign.
+  attachmentName      String?      @map("attachment_name")
+  attachmentType      String?      @map("attachment_type")
+  attachmentSize      Int?         @map("attachment_size")
+  attachmentData      Bytes?       @map("attachment_data")
+  /// Local path when the file is kept on disk instead of in the database.
+  attachmentPath      String?      @map("attachment_path")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -729,4 +758,374 @@ model RateLimitBucket {
   windowStart DateTime @map("window_start")
 
   @@map("rate_limit_buckets")
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* E-Signature                                                                                */
+/* ------------------------------------------------------------------------------------------ */
+
+enum SignatureRequestStatus {
+  DRAFT
+  SENT
+  DELIVERED
+  VIEWED
+  IN_REVIEW
+  PARTIALLY_SIGNED
+  /// Every signer has signed; the final PDF is being generated.
+  PENDING
+  COMPLETED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum SignerStatus {
+  /// Waiting for an earlier signer (sequential) or for the request to be sent.
+  WAITING
+  SENT
+  DELIVERED
+  VIEWED
+  IN_REVIEW
+  SIGNED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum SignerRole {
+  SIGNER
+  APPROVER
+  /// Receives the completed document only.
+  CC
+}
+
+enum SigningOrder {
+  SEQUENTIAL
+  PARALLEL
+}
+
+enum SignatureFieldType {
+  SIGNATURE
+  INITIALS
+  DATE
+  NAME
+  TEXT
+}
+
+enum SignatureMethod {
+  DRAWN
+  UPLOADED
+  TYPED
+}
+
+enum NotificationKind {
+  INVITATION
+  REMINDER
+  OTP
+  VIEWED
+  PARTIALLY_SIGNED
+  COMPLETED
+  REJECTED
+  EXPIRED
+  CANCELLED
+  DELIVERY_FAILED
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+enum VerificationChannel {
+  EMAIL
+  SMS
+}
+
+enum VerificationOutcome {
+  PENDING
+  VERIFIED
+  FAILED
+  EXPIRED
+  LOCKED
+}
+
+model Document {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  title     String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions DocumentVersion[]
+
+  @@index([userId, createdAt])
+  @@map("documents")
+}
+
+/// One uploaded file. A DOCX keeps its original next to the converted PDF; signing always uses the PDF.
+model DocumentVersion {
+  id             String   @id @default(cuid())
+  documentId     String   @map("document_id")
+  version        Int
+  originalName   String   @map("original_name")
+  originalMime   String   @map("original_mime")
+  originalSize   Int      @map("original_size")
+  originalSha256 String   @map("original_sha256")
+  /// Encrypted file under the e-sign storage directory; never exposed to clients.
+  originalKey    String   @map("original_key")
+  pdfSize        Int      @map("pdf_size")
+  pdfSha256      String   @map("pdf_sha256")
+  pdfKey         String   @map("pdf_key")
+  pageCount      Int      @map("page_count")
+  converted      Boolean  @default(false)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  document Document           @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  requests SignatureRequest[]
+
+  @@unique([documentId, version])
+  @@map("document_versions")
+}
+
+model SignatureRequest {
+  id                String                 @id @default(cuid())
+  userId            String                 @map("user_id")
+  documentVersionId String                 @map("document_version_id")
+  title             String
+  subject           String
+  message           String?
+  status            SignatureRequestStatus @default(DRAFT)
+  signingOrder      SigningOrder           @default(SEQUENTIAL) @map("signing_order")
+  expiresAt         DateTime               @map("expires_at")
+  reminderEveryDays Int                    @default(2) @map("reminder_every_days")
+  senderName        String                 @map("sender_name")
+  senderEmail       String                 @map("sender_email")
+  senderCompany     String?                @map("sender_company")
+  /// SHA-256 of the PDF the recipients were asked to sign, fixed when the request is sent.
+  documentSha256    String?                @map("document_sha256")
+  finalKey          String?                @map("final_key")
+  finalSha256       String?                @map("final_sha256")
+  finalSize         Int?                   @map("final_size")
+  /// "electronic" or the PdfSigner that applied a certificate-based signature.
+  signatureLevel    String                 @default("electronic") @map("signature_level")
+  finalizeError     String?                @map("finalize_error")
+  finalizeAttempts  Int                    @default(0) @map("finalize_attempts")
+  sentAt            DateTime?              @map("sent_at")
+  completedAt       DateTime?              @map("completed_at")
+  rejectedAt        DateTime?              @map("rejected_at")
+  expiredAt         DateTime?              @map("expired_at")
+  cancelledAt       DateTime?              @map("cancelled_at")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  version       DocumentVersion        @relation(fields: [documentVersionId], references: [id], onDelete: Restrict)
+  recipients    SignatureRecipient[]
+  fields        SignatureField[]
+  signatures    Signature[]
+  events        SignatureEvent[]
+  auditLogs     AuditLog[]
+  notifications EmailNotification[]
+  certificate   CompletionCertificate?
+
+  @@index([userId, createdAt])
+  @@index([status, expiresAt])
+  @@map("signature_requests")
+}
+
+model SignatureRecipient {
+  id                  String       @id @default(cuid())
+  requestId           String       @map("request_id")
+  name                String
+  email               String
+  role                SignerRole   @default(SIGNER)
+  routingOrder        Int          @default(1) @map("routing_order")
+  status              SignerStatus @default(WAITING)
+  phone               String?
+  requireSmsOtp       Boolean      @default(false) @map("require_sms_otp")
+  /// SHA-256 of the link token; the raw token is only in the email and (encrypted) for reminders.
+  tokenHash           String?      @unique @map("token_hash")
+  tokenEnc            String?      @map("token_enc")
+  tokenRevokedAt      DateTime?    @map("token_revoked_at")
+  signingSessionHash  String?      @map("signing_session_hash")
+  signingSessionUntil DateTime?    @map("signing_session_until")
+  sentAt              DateTime?    @map("sent_at")
+  deliveredAt         DateTime?    @map("delivered_at")
+  viewedAt            DateTime?    @map("viewed_at")
+  reviewedAt          DateTime?    @map("reviewed_at")
+  consentAt           DateTime?    @map("consent_at")
+  consentText         String?      @map("consent_text")
+  consentIp           String?      @map("consent_ip")
+  consentUserAgent    String?      @map("consent_user_agent")
+  emailVerifiedAt     DateTime?    @map("email_verified_at")
+  smsVerifiedAt       DateTime?    @map("sms_verified_at")
+  signedAt            DateTime?    @map("signed_at")
+  rejectedAt          DateTime?    @map("rejected_at")
+  rejectReason        String?      @map("reject_reason")
+  lastReminderAt      DateTime?    @map("last_reminder_at")
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @updatedAt @map("updated_at")
+
+  request       SignatureRequest     @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  fields        SignatureField[]
+  signature     Signature?
+  verifications VerificationAttempt[]
+  notifications EmailNotification[]
+
+  @@unique([requestId, email])
+  @@index([requestId, routingOrder])
+  @@map("signature_recipients")
+}
+
+/// Position on the page as seen by the viewer (rotation applied), normalised to 0..1 from the top-left.
+model SignatureField {
+  id          String             @id @default(cuid())
+  requestId   String             @map("request_id")
+  recipientId String             @map("recipient_id")
+  type        SignatureFieldType
+  page        Int
+  x           Float
+  y           Float
+  width       Float
+  height      Float
+  required    Boolean            @default(true)
+  label       String?
+  /// Filled text for NAME / DATE / TEXT fields; set when the recipient signs.
+  value       String?
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  request   SignatureRequest   @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  recipient SignatureRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, page])
+  @@map("signature_fields")
+}
+
+model Signature {
+  id             String          @id @default(cuid())
+  requestId      String          @map("request_id")
+  recipientId    String          @unique @map("recipient_id")
+  method         SignatureMethod
+  /// PNG of the adopted signature, as placed on the document.
+  image          Bytes
+  typedName      String?         @map("typed_name")
+  fontStyle      String?         @map("font_style")
+  signerName     String          @map("signer_name")
+  signerEmail    String          @map("signer_email")
+  ip             String?
+  userAgent      String?         @map("user_agent")
+  /// SHA-256 of the PDF that was shown when signing.
+  documentSha256 String          @map("document_sha256")
+  createdAt      DateTime        @default(now()) @map("created_at")
+
+  request   SignatureRequest   @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  recipient SignatureRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@map("signatures")
+}
+
+/// Timeline of a request. Append-only (enforced by a database trigger).
+model SignatureEvent {
+  id          String   @id @default(cuid())
+  requestId   String   @map("request_id")
+  recipientId String?  @map("recipient_id")
+  type        String
+  message     String
+  ip          String?
+  userAgent   String?  @map("user_agent")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  request SignatureRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, createdAt])
+  @@map("signature_events")
+}
+
+/// Tamper-evident security log. Append-only (database trigger); each row hashes the previous row of the same scope.
+model AuditLog {
+  id          String   @id @default(cuid())
+  seq         BigInt   @default(autoincrement())
+  userId      String?  @map("user_id")
+  requestId   String?  @map("request_id")
+  documentId  String?  @map("document_id")
+  recipientId String?  @map("recipient_id")
+  action      String
+  actor       String
+  ip          String?
+  userAgent   String?  @map("user_agent")
+  details     Json?
+  prevHash    String?  @map("prev_hash")
+  hash        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  request SignatureRequest? @relation(fields: [requestId], references: [id], onDelete: Restrict)
+
+  @@unique([seq])
+  @@index([requestId, seq])
+  @@index([userId, createdAt])
+  @@map("audit_logs")
+}
+
+model EmailNotification {
+  id                String             @id @default(cuid())
+  requestId         String             @map("request_id")
+  recipientId       String?            @map("recipient_id")
+  kind              NotificationKind
+  toEmail           String             @map("to_email")
+  subject           String
+  status            NotificationStatus @default(QUEUED)
+  attempts          Int                @default(0)
+  lastError         String?            @map("last_error")
+  providerMessageId String?            @map("provider_message_id")
+  nextAttemptAt     DateTime?          @map("next_attempt_at")
+  sentAt            DateTime?          @map("sent_at")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+
+  request   SignatureRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  recipient SignatureRecipient? @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([requestId, createdAt])
+  @@map("email_notifications")
+}
+
+model VerificationAttempt {
+  id          String              @id @default(cuid())
+  recipientId String              @map("recipient_id")
+  channel     VerificationChannel
+  /// HMAC-SHA256 of the one-time code; the code itself is never stored.
+  codeHash    String              @map("code_hash")
+  destination String
+  outcome     VerificationOutcome @default(PENDING)
+  attempts    Int                 @default(0)
+  expiresAt   DateTime            @map("expires_at")
+  verifiedAt  DateTime?           @map("verified_at")
+  ip          String?
+  userAgent   String?             @map("user_agent")
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  recipient SignatureRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, createdAt])
+  @@map("verification_attempts")
+}
+
+model CompletionCertificate {
+  id             String   @id @default(cuid())
+  requestId      String   @unique @map("request_id")
+  storageKey     String   @map("storage_key")
+  sha256         String
+  size           Int
+  originalSha256 String   @map("original_sha256")
+  finalSha256    String   @map("final_sha256")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  request SignatureRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@map("completion_certificates")
 }

@@ -1,6 +1,6 @@
 import "server-only";
 import { getAiProvider } from "@/lib/ai";
-import { buildBulkPrompt, bulkBodyProblems, bulkLeakProblems, bulkSubjectProblems } from "@/lib/ai/bulk-email";
+import { applyHighlights, buildBulkPrompt, bulkLeakProblems, bulkSubjectProblems, defaultHighlight } from "@/lib/ai/bulk-email";
 import { promptSnapshot } from "@/lib/ai/prompt";
 import { AiError, describeAiError } from "@/lib/ai/types";
 import { hasSenderPlaceholders, renderBulkEmail, senderSignature } from "@/lib/bulk/placeholders";
@@ -17,8 +17,8 @@ const MAX_VALIDATION_RETRIES = 1;
 
 /**
  * One row. The body is first rendered deterministically (placeholders filled, sender signature
- * appended); the AI then writes the subject (if chosen) and adjusts that body with the row's details.
- * Anything that fails the checks falls back to the rendered body, so the sender's text is never lost.
+ * appended); the AI then writes the subject (if chosen) and picks key phrases to bold. Only those phrases
+ * are copied onto the rendered body, so its words never change.
  */
 export async function runBulkJob(ccId: string): Promise<void> {
   const cc = await db().campaignContact.findUnique({ where: { id: ccId }, include: { campaign: true, contact: true } });
@@ -58,7 +58,7 @@ export async function runBulkJob(ccId: string): Promise<void> {
   const who = `${customerName} (${companyName})`;
 
   let subject = fixedSubject ?? "";
-  let body = rendered.body;
+  let body = defaultHighlight(rendered.body);
   let model = BULK_MODEL;
   let aiProblem: string | null = null;
   const maxAttempts = env().AI_MAX_RETRIES + 1 + MAX_VALIDATION_RETRIES;
@@ -73,15 +73,13 @@ export async function runBulkJob(ccId: string): Promise<void> {
       return;
     }
     try {
-      const result = await provider.generate(prompt, { correction });
+      const result = await provider.generate(prompt, { correction, temperature: 0 });
       const candidate = {
         subject: aiSubject ? result.content.subject.replace(/\s+/g, " ").trim() : (fixedSubject ?? ""),
-        body: aiBody ? result.content.body : rendered.body,
+        body: aiBody ? defaultHighlight(applyHighlights(rendered.body, result.content.body, signature)) : rendered.body,
       };
       const problems = [
-        ...(aiSubject ? bulkSubjectProblems(candidate.subject) : []),
-        ...(aiBody ? bulkBodyProblems(rendered.body, candidate.body) : []),
-        ...(aiBody && signature && !candidate.body.trimEnd().endsWith(signature) ? ["Changed the sender signature block"] : []),
+        ...(aiSubject ? bulkSubjectProblems(candidate.subject, rendered.body) : []),
         ...bulkLeakProblems(candidate, { id: cc.id, name: customerName, company: companyName, renderedBody: rendered.body, supplied }, peers),
       ];
       await db().aiGenerationLog.create({
